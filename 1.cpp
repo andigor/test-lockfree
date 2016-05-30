@@ -107,22 +107,23 @@ public:
 
   void lock(cpu& c)
   {
-    c.can_run_ = 0;
-    cpu * pred = queue_.cpu_.exchange(&c, boost::memory_order_seq_cst);
+    c.next_ = 0;
+    cpu * pred = queue_.cpu_.exchange(&c, boost::memory_order_relaxed);
     if (pred != 0) {
       //atomic_thread_fence(boost::memory_order_seq_cst);
+      c.can_run_ = 0x120;
       pred->next_ = &c;
 
       //atomic_thread_fence(boost::memory_order_seq_cst);
 
     //std::cout <<  boost::this_thread::get_id() <<  " going to sleep"  << std::endl;
-      while (c.can_run_ == 0) {
+      while (c.can_run_ != 0x123) {
         asm volatile("": : :"memory");
         //std::cout <<  boost::this_thread::get_id() <<  " " << c.can_run_  << std::endl;
       } 
-    //std::cout <<  boost::this_thread::get_id() <<  " woke up"  << std::endl;
     }
-    c.can_run_ = 1;
+    //std::cout << "is going to work " << boost::this_thread::get_id() << std::endl;
+    //c.can_run_ = 1;
   }
 
   void unlock(cpu& c)
@@ -130,7 +131,7 @@ public:
     if (queue_.cpu_.load() == &c) {
       cpu * cc = &c;
       if (queue_.cpu_.compare_exchange_strong(cc, 0, boost::memory_order_relaxed)) {
-      //  std::cout << "nothing to wake: " << boost::this_thread::get_id() << std::endl;
+        //std::cout << "unlock: nothing to wake: " << boost::this_thread::get_id() << std::endl;
         return;
       }
      // std::cout << "hahahah" << std::endl;
@@ -140,10 +141,18 @@ public:
     while (c.next_ == 0) {
       asm volatile("": : :"memory");
     }
+
+    while (c.next_->can_run_ != 0x120) {
+      asm volatile("": : :"memory");
+    }
       //atomic_thread_fence(boost::memory_order_seq_cst);
+    //std::cout << "unlock: waking next: " << boost::this_thread::get_id() << 
+    //              std::hex << " cpy: " << c.next_->can_run_ << std::endl;
+
     c.next_->can_run_ = 0x123;
+    c.next_ = 0;
+    c.can_run_ = 0x33;
     //atomic_thread_fence(boost::memory_order_seq_cst);
-    //std::cout << "waking: " << boost::this_thread::get_id() << std::endl;
   }
 };
 
@@ -153,34 +162,35 @@ using boost::container::flat_map;
 template <class Lock>
 void counter_func1(Lock& mtx, size_t count, size_t & val)
 {
+  unsigned long long max = 0;
   for (size_t i = 0; i<count; ++i) {
-    unsigned long long before = rdtsc();
+    unsigned long long before_lock = rdtsc();
     mtx.lock();
-    unsigned long long after  = rdtsc();
-    //m[i] = i;
-    //mtx.state_.test_and_set(boost::memory_order_acquire);
+    unsigned long long after_lock  = rdtsc();
+    //std::cout << "                iter: " << after - before << " " <<  boost::this_thread::get_id() << std::dec  << " "  << val << std::endl;
+    //std::cout <<  boost::this_thread::get_id() << std::dec  << " "  << val << std::endl;
     ++val;
-    std::cout << after - before << " " <<  boost::this_thread::get_id() << std::dec  << " "  << val << std::endl;
-      //std::cout << boost::this_thread::get_id() << std::dec <<  " waiting for: " << v << " current: " << current_ << std::endl;
-    //mtx.state_.clear(boost::memory_order_release);
     mtx.unlock();
+    max = std::max(max, after_lock - before_lock);
   }
+  std::cout << "max: " << max << std::endl;
 }
 
 void counter_func2(spinlock2& mtx, size_t count, size_t & val)
 {
+  unsigned long long max = 0;
   for (size_t i = 0; i<count; ++i) {
-    cpu c;
-    unsigned long long before = rdtsc();
+    cpu c __attribute__((aligned(64)));
+    unsigned long long before_lock = rdtsc();
     mtx.lock(c);
-    unsigned long long after  = rdtsc();
-
-    std::cout << after - before << " " <<  boost::this_thread::get_id() << std::dec  << " "  << val << std::endl;
+    unsigned long long after_lock  = rdtsc();
+    //std::cout << "                iter: " << after - before << " " <<  boost::this_thread::get_id() << std::dec  << " "  << val << std::endl;
     //std::cout <<  boost::this_thread::get_id() << std::dec  << " "  << val << std::endl;
     ++val;
-
     mtx.unlock(c);
+    max = std::max(max, after_lock - before_lock);
   }
+  std::cout << "max: " << max << std::endl;
 }
 int main(int argc, char ** argv)
 {
@@ -208,42 +218,42 @@ int main(int argc, char ** argv)
  // boost::thread thr2(counter_func1, boost::ref(mtx), count, boost::ref(val));
   size_t vvv = count / 4;
 
-  //boost::thread thr1(counter_func2<boost::mutex>, boost::ref(mtx), vvv, boost::ref(val));
-  //boost::thread thr2(counter_func2<boost::mutex>, boost::ref(mtx), vvv, boost::ref(val));
-  //boost::thread thr3(counter_func2<boost::mutex>, boost::ref(mtx), vvv, boost::ref(val));
-  //boost::thread thr4(counter_func2<boost::mutex>, boost::ref(mtx), vvv, boost::ref(val));
-  //boost::thread thr5(counter_func2<boost::mutex>, boost::ref(mtx), vvv, boost::ref(val));
-  //boost::thread thr6(counter_func2<boost::mutex>, boost::ref(mtx), vvv, boost::ref(val));
-  //boost::thread thr7(counter_func2<boost::mutex>, boost::ref(mtx), vvv, boost::ref(val));
-  //boost::thread thr8(counter_func2<boost::mutex>, boost::ref(mtx), vvv, boost::ref(val));
+  //boost::thread thr1(counter_func1<boost::mutex>, boost::ref(mtx), vvv, boost::ref(val));
+  //boost::thread thr2(counter_func1<boost::mutex>, boost::ref(mtx), vvv, boost::ref(val));
+  //boost::thread thr3(counter_func1<boost::mutex>, boost::ref(mtx), vvv, boost::ref(val));
+  //boost::thread thr4(counter_func1<boost::mutex>, boost::ref(mtx), vvv, boost::ref(val));
+  //boost::thread thr5(counter_func1<boost::mutex>, boost::ref(mtx), vvv, boost::ref(val));
+  //boost::thread thr6(counter_func1<boost::mutex>, boost::ref(mtx), vvv, boost::ref(val));
+  //boost::thread thr7(counter_func1<boost::mutex>, boost::ref(mtx), vvv, boost::ref(val));
+  //boost::thread thr8(counter_func1<boost::mutex>, boost::ref(mtx), vvv, boost::ref(val));
 
-  //boost::thread thr1(counter_func2<spinlock1>, boost::ref(lk1), vvv, boost::ref(val));
-  //boost::thread thr2(counter_func2<spinlock1>, boost::ref(lk1), vvv, boost::ref(val));
-  //boost::thread thr3(counter_func2<spinlock1>, boost::ref(lk1), vvv, boost::ref(val));
-  //boost::thread thr4(counter_func2<spinlock1>, boost::ref(lk1), vvv, boost::ref(val));
-  //boost::thread thr5(counter_func2<spinlock1>, boost::ref(lk1), vvv, boost::ref(val));
-  //boost::thread thr6(counter_func2<spinlock1>, boost::ref(lk1), vvv, boost::ref(val));
-  //boost::thread thr7(counter_func2<spinlock1>, boost::ref(lk1), vvv, boost::ref(val));
-  //boost::thread thr8(counter_func2<spinlock1>, boost::ref(lk1), vvv, boost::ref(val));
+  //boost::thread thr1(counter_func1<spinlock>, boost::ref(lk), vvv, boost::ref(val));
+  //boost::thread thr2(counter_func1<spinlock>, boost::ref(lk), vvv, boost::ref(val));
+  //boost::thread thr3(counter_func1<spinlock>, boost::ref(lk), vvv, boost::ref(val));
+  //boost::thread thr4(counter_func1<spinlock>, boost::ref(lk), vvv, boost::ref(val));
+  //boost::thread thr5(counter_func1<spinlock>, boost::ref(lk), vvv, boost::ref(val));
+  //boost::thread thr6(counter_func1<spinlock>, boost::ref(lk), vvv, boost::ref(val));
+  //boost::thread thr7(counter_func1<spinlock>, boost::ref(lk), vvv, boost::ref(val));
+  //boost::thread thr8(counter_func1<spinlock>, boost::ref(lk), vvv, boost::ref(val));
 
 
   boost::thread thr1(counter_func2, boost::ref(lk2), vvv, boost::ref(val));
   boost::thread thr2(counter_func2, boost::ref(lk2), vvv, boost::ref(val));
   boost::thread thr3(counter_func2, boost::ref(lk2), vvv, boost::ref(val));
   boost::thread thr4(counter_func2, boost::ref(lk2), vvv, boost::ref(val));
-  boost::thread thr5(counter_func2, boost::ref(lk2), vvv, boost::ref(val));
-  boost::thread thr6(counter_func2, boost::ref(lk2), vvv, boost::ref(val));
-  boost::thread thr7(counter_func2, boost::ref(lk2), vvv, boost::ref(val));
-  boost::thread thr8(counter_func2, boost::ref(lk2), vvv, boost::ref(val));
+  //boost::thread thr5(counter_func2, boost::ref(lk2), vvv, boost::ref(val));
+  //boost::thread thr6(counter_func2, boost::ref(lk2), vvv, boost::ref(val));
+  //boost::thread thr7(counter_func2, boost::ref(lk2), vvv, boost::ref(val));
+  //boost::thread thr8(counter_func2, boost::ref(lk2), vvv, boost::ref(val));
 
   thr1.join();
   thr2.join();
   thr3.join();
   thr4.join();
-  thr5.join();
-  thr6.join();
-  thr7.join();
-  thr8.join();
+  //thr5.join();
+  //thr6.join();
+  //thr7.join();
+  //thr8.join();
 
   std::cout << map.size() << " val: " << val << std::endl;
 
